@@ -323,6 +323,7 @@ export default function TankGame({ nickname, serverIp }) {
   const worldSizeRef = useRef(200)
   const effectsRef = useRef([])
   const smokeRef = useRef([])
+  const collidersRef = useRef([])
 
   const [health, setHealth] = useState(100)
   const [players, setPlayers] = useState([])
@@ -439,6 +440,9 @@ export default function TankGame({ nickname, serverIp }) {
     })
 
     // Rocks & obstacles
+    const TANK_RADIUS = 1.6
+    collidersRef.current = []
+
     for (let i = 0; i < 25; i++) {
       const rock = createRockMesh()
       const scale = 1 + Math.random() * 2
@@ -450,6 +454,11 @@ export default function TankGame({ nickname, serverIp }) {
       )
       rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI)
       scene.add(rock)
+      collidersRef.current.push({
+        x: rock.position.x,
+        z: rock.position.z,
+        radius: scale * 1.0 + TANK_RADIUS
+      })
     }
 
     // Trees
@@ -463,6 +472,11 @@ export default function TankGame({ nickname, serverIp }) {
         (Math.random() - 0.5) * ws * 1.6
       )
       scene.add(tree)
+      collidersRef.current.push({
+        x: tree.position.x,
+        z: tree.position.z,
+        radius: scale * 1.2 + TANK_RADIUS
+      })
     }
 
     // Grass tufts (simple green cones scattered)
@@ -721,10 +735,29 @@ export default function TankGame({ nickname, serverIp }) {
           moved = true
         }
 
-        // Clamp to world bounds
+        // World bounds (wall thickness ~2.5, tank radius ~1.6)
         const ws = worldSizeRef.current
-        tank.position.x = Math.max(-ws + 2, Math.min(ws - 2, tank.position.x))
-        tank.position.z = Math.max(-ws + 2, Math.min(ws - 2, tank.position.z))
+        const boundaryLimit = ws - 2.8
+        tank.position.x = Math.max(-boundaryLimit, Math.min(boundaryLimit, tank.position.x))
+        tank.position.z = Math.max(-boundaryLimit, Math.min(boundaryLimit, tank.position.z))
+
+        // Obstacle collision resolution
+        const colliders = collidersRef.current
+        for (let i = 0; i < colliders.length; i++) {
+          const c = colliders[i]
+          const dx = tank.position.x - c.x
+          const dz = tank.position.z - c.z
+          const distSq = dx * dx + dz * dz
+          const r = c.radius
+          if (distSq < r * r && distSq > 0.0001) {
+            const dist = Math.sqrt(distSq)
+            const overlap = r - dist
+            const nx = dx / dist
+            const nz = dz / dist
+            tank.position.x += nx * overlap
+            tank.position.z += nz * overlap
+          }
+        }
 
         // Turret aim at mouse
         const turret = tank.userData.turret
