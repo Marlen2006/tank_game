@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three'
 import { io } from 'socket.io-client'
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader'
 
 /* ================================================================
    REALISTIC TANK MODEL
@@ -249,30 +250,6 @@ function createGroundTexture() {
   return tex
 }
 
-function createRockMesh() {
-  const geo = new THREE.DodecahedronGeometry(1 + Math.random() * 1.5, 1)
-  const posAttr = geo.attributes.position
-  for (let i = 0; i < posAttr.count; i++) {
-    posAttr.setXYZ(
-      i,
-      posAttr.getX(i) + (Math.random() - 0.5) * 0.4,
-      posAttr.getY(i) + (Math.random() - 0.5) * 0.4,
-      posAttr.getZ(i) + (Math.random() - 0.5) * 0.4
-    )
-  }
-  geo.computeVertexNormals()
-  const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color().setHSL(0, 0, 0.35 + Math.random() * 0.15),
-    roughness: 0.9,
-    metalness: 0.1,
-    flatShading: true
-  })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-  return mesh
-}
-
 function createTree() {
   const group = new THREE.Group()
 
@@ -439,27 +416,9 @@ export default function TankGame({ nickname, serverIp }) {
       scene.add(mesh)
     })
 
-    // Rocks & obstacles
+    // Rocks & obstacles (Procedural rocks removed to use the new stone.glb)
     const TANK_RADIUS = 1.6
     collidersRef.current = []
-
-    for (let i = 0; i < 25; i++) {
-      const rock = createRockMesh()
-      const scale = 1 + Math.random() * 2
-      rock.scale.set(scale, scale * 0.7, scale)
-      rock.position.set(
-        (Math.random() - 0.5) * ws * 1.6,
-        scale * 0.3,
-        (Math.random() - 0.5) * ws * 1.6
-      )
-      rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI)
-      scene.add(rock)
-      collidersRef.current.push({
-        x: rock.position.x,
-        z: rock.position.z,
-        radius: scale * 1.0 + TANK_RADIUS
-      })
-    }
 
     // Trees
     for (let i = 0; i < 40; i++) {
@@ -497,6 +456,43 @@ export default function TankGame({ nickname, serverIp }) {
     }
     grassInstanced.receiveShadow = true
     scene.add(grassInstanced)
+
+    // Load 3D Models (Houses & Stones)
+    const gltfLoader = new GLTFLoader()
+
+    // Houses
+    gltfLoader.load('/models/house.glb', (gltf) => {
+      console.log('House model loaded successfully')
+      const houseModel = gltf.scene
+      
+      // Calculate height to place it correctly on the ground
+      const box = new THREE.Box3().setFromObject(houseModel)
+      const heightOffset = -box.min.y
+      
+      houseModel.traverse((node) => {
+        if (node.isMesh) {
+          node.castShadow = true
+          node.receiveShadow = true
+        }
+      })
+      
+      for (let i = 0; i < 15; i++) {
+        const house = houseModel.clone()
+        const scale = 0.8 + Math.random() * 0.4
+        house.scale.set(scale, scale, scale)
+        const x = (Math.random() - 0.5) * ws * 1.5
+        const z = (Math.random() - 0.5) * ws * 1.5
+        house.position.set(x, heightOffset * scale, z)
+        house.rotation.y = Math.random() * Math.PI * 2
+        scene.add(house)
+        
+        collidersRef.current.push({
+          x: x,
+          z: z,
+          radius: scale * 2.5 + TANK_RADIUS // Much smaller collision radius
+        })
+      }
+    }, undefined, (error) => console.error('Error loading house model:', error))
 
     // Socket connection
     const serverUrl = serverIp === 'localhost' ? 'http://localhost:3002' : `http://${serverIp}:3002`
