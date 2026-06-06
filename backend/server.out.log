@@ -1,0 +1,8 @@
+
+> tank-game-backend@1.0.0 dev
+> node server.js
+
+Tank game server running on http://0.0.0.0:3002
+Local access: http://localhost:3002
+Network access: http://<your-ip>:3002
+Player connected: Z3cE_Wbhr6M8bv-EAAAC
