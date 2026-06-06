@@ -279,6 +279,101 @@ function createTree() {
   return group
 }
 
+function createLoopingNoiseSource(audioCtx) {
+  const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate)
+  const data = buffer.getChannelData(0)
+
+  for (let i = 0; i < data.length; i++) {
+    data[i] = (Math.random() * 2 - 1) * 0.7
+  }
+
+  const source = audioCtx.createBufferSource()
+  source.buffer = buffer
+  source.loop = true
+  return source
+}
+
+function createTankDriveSound(audioCtx) {
+  const masterGain = audioCtx.createGain()
+  masterGain.gain.value = 0.0001
+
+  const compressor = audioCtx.createDynamicsCompressor()
+  compressor.threshold.value = -18
+  compressor.knee.value = 18
+  compressor.ratio.value = 4
+  compressor.attack.value = 0.01
+  compressor.release.value = 0.18
+
+  const engineOsc = audioCtx.createOscillator()
+  engineOsc.type = 'sawtooth'
+  engineOsc.frequency.value = 48
+
+  const engineFilter = audioCtx.createBiquadFilter()
+  engineFilter.type = 'lowpass'
+  engineFilter.frequency.value = 180
+  engineFilter.Q.value = 1.2
+
+  const engineGain = audioCtx.createGain()
+  engineGain.gain.value = 0.34
+
+  const subOsc = audioCtx.createOscillator()
+  subOsc.type = 'triangle'
+  subOsc.frequency.value = 26
+
+  const subGain = audioCtx.createGain()
+  subGain.gain.value = 0.2
+
+  const trackNoise = createLoopingNoiseSource(audioCtx)
+  const trackFilter = audioCtx.createBiquadFilter()
+  trackFilter.type = 'bandpass'
+  trackFilter.frequency.value = 310
+  trackFilter.Q.value = 0.7
+
+  const trackGain = audioCtx.createGain()
+  trackGain.gain.value = 0.16
+
+  engineOsc.connect(engineFilter)
+  engineFilter.connect(engineGain)
+  engineGain.connect(masterGain)
+
+  subOsc.connect(subGain)
+  subGain.connect(masterGain)
+
+  trackNoise.connect(trackFilter)
+  trackFilter.connect(trackGain)
+  trackGain.connect(masterGain)
+
+  masterGain.connect(compressor)
+  compressor.connect(audioCtx.destination)
+
+  engineOsc.start()
+  subOsc.start()
+  trackNoise.start()
+
+  return {
+    setMoving(moving, intensity = 1) {
+      const now = audioCtx.currentTime
+      const targetGain = moving ? 0.56 + intensity * 0.12 : 0.0001
+      const engineHz = moving ? 58 + intensity * 18 : 42
+      const subHz = moving ? 29 + intensity * 5 : 24
+      const trackHz = moving ? 360 + intensity * 180 : 220
+
+      masterGain.gain.cancelScheduledValues(now)
+      masterGain.gain.setTargetAtTime(targetGain, now, moving ? 0.08 : 0.18)
+      engineOsc.frequency.setTargetAtTime(engineHz, now, 0.12)
+      subOsc.frequency.setTargetAtTime(subHz, now, 0.18)
+      trackFilter.frequency.setTargetAtTime(trackHz, now, 0.1)
+    },
+    stop() {
+      engineOsc.stop()
+      subOsc.stop()
+      trackNoise.stop()
+      masterGain.disconnect()
+      compressor.disconnect()
+    }
+  }
+}
+
 /* ================================================================
    MAIN COMPONENT
    ================================================================ */
@@ -301,6 +396,8 @@ export default function TankGame({ nickname, serverIp }) {
   const effectsRef = useRef([])
   const smokeRef = useRef([])
   const collidersRef = useRef([])
+  const audioCtxRef = useRef(null)
+  const driveSoundRef = useRef(null)
 
   const [health, setHealth] = useState(100)
   const [players, setPlayers] = useState([])
@@ -495,7 +592,13 @@ export default function TankGame({ nickname, serverIp }) {
     }, undefined, (error) => console.error('Error loading house model:', error))
 
     // Socket connection
-    const serverUrl = serverIp === 'localhost' ? 'http://localhost:3002' : `http://${serverIp}:3002`
+    const trimmedServerIp = serverIp.trim()
+    const isLocalPage = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+    const serverUrl = /^https?:\/\//i.test(trimmedServerIp)
+      ? trimmedServerIp
+      : trimmedServerIp === 'localhost'
+        ? isLocalPage ? 'http://localhost:3002' : window.location.origin
+        : `http://${trimmedServerIp}:3002`
     const socket = io(serverUrl, { transports: ['websocket', 'polling'] })
     socketRef.current = socket
 
@@ -622,8 +725,37 @@ export default function TankGame({ nickname, serverIp }) {
       setPlayers(list)
     }
 
+    function ensureAudio() {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext
+      if (!AudioContextClass) return null
+
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new AudioContextClass()
+      }
+
+      if (!driveSoundRef.current) {
+        driveSoundRef.current = createTankDriveSound(audioCtxRef.current)
+      }
+
+      if (audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {})
+      }
+
+      return audioCtxRef.current
+    }
+
+    function playShotSound() {
+      ensureAudio()
+
+      const shot = new Audio('/audio/tank-shot.mp3')
+      shot.volume = 0.95
+      shot.playbackRate = 0.96 + Math.random() * 0.08
+      shot.play().catch(() => {})
+    }
+
     // Input handlers
     const onKeyDown = (e) => {
+      ensureAudio()
       keysRef.current[e.code] = true
       if (e.code === 'Space') {
         e.preventDefault()
@@ -636,6 +768,7 @@ export default function TankGame({ nickname, serverIp }) {
       mouseRef.current.y = e.clientY
     }
     const onMouseDown = (e) => {
+      ensureAudio()
       if (e.button === 0) shoot()
     }
 
@@ -658,6 +791,8 @@ export default function TankGame({ nickname, serverIp }) {
 
       const tank = playerTankRef.current
       if (!tank) return
+
+      playShotSound()
 
       const turret = tank.userData.turret
       const worldPos = new THREE.Vector3()
@@ -785,6 +920,16 @@ export default function TankGame({ nickname, serverIp }) {
           })
         }
 
+        if (driveSoundRef.current) {
+          const isDriving = Boolean(
+            keysRef.current['KeyW'] ||
+            keysRef.current['ArrowUp'] ||
+            keysRef.current['KeyS'] ||
+            keysRef.current['ArrowDown']
+          )
+          driveSoundRef.current.setMoving(moved, isDriving ? 1 : 0.45)
+        }
+
         // Camera follow (smoother, lower angle)
         const camOffset = new THREE.Vector3(0, 10, -16)
         camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), tank.rotation.y)
@@ -883,6 +1028,14 @@ export default function TankGame({ nickname, serverIp }) {
 
     return () => {
       cancelAnimationFrame(animFrameRef.current)
+      if (driveSoundRef.current) {
+        driveSoundRef.current.stop()
+        driveSoundRef.current = null
+      }
+      if (audioCtxRef.current) {
+        audioCtxRef.current.close().catch(() => {})
+        audioCtxRef.current = null
+      }
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('mousemove', onMouseMove)

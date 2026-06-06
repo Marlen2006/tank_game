@@ -17,7 +17,7 @@ function App() {
       <div className="game-container">
         <div className="connect-panel">
           <h1>Tank Battle 3D</h1>
-          <p>Multiplayer tank arena. Play with friends on the same network!</p>
+          <p>Multiplayer tank arena. Play with friends online!</p>
           <input
             type="text"
             placeholder="Your nickname"
@@ -27,7 +27,7 @@ function App() {
           />
           <input
             type="text"
-            placeholder="Server IP (default: localhost)"
+            placeholder="Server URL or IP (default: localhost)"
             value={serverIp}
             onChange={(e) => setServerIp(e.target.value)}
           />
