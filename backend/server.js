@@ -41,6 +41,21 @@ function getRandomPosition() {
   };
 }
 
+function getLeaderboard() {
+  return Array.from(players.values())
+    .map((player) => ({
+      id: player.id,
+      nickname: player.nickname,
+      kills: player.kills,
+      deaths: player.deaths
+    }))
+    .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.nickname.localeCompare(b.nickname));
+}
+
+function emitLeaderboard() {
+  io.emit('leaderboard', getLeaderboard());
+}
+
 io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
 
@@ -55,6 +70,8 @@ io.on('connection', (socket) => {
     color: getRandomColor(),
     health: 100,
     nickname: `Tank ${socket.id.substr(0, 4)}`,
+    kills: 0,
+    deaths: 0,
     lastShot: 0
   };
   players.set(socket.id, player);
@@ -68,6 +85,7 @@ io.on('connection', (socket) => {
 
   // Notify others about new player
   socket.broadcast.emit('playerJoined', player);
+  emitLeaderboard();
 
   // Handle player movement
   socket.on('move', (data) => {
@@ -106,10 +124,32 @@ io.on('connection', (socket) => {
       vx: data.vx,
       vy: data.vy,
       vz: data.vz,
-      createdAt: now
+      createdAt: now,
+      clientProjectileId: data.clientProjectileId
     };
     projectiles.set(id, projectile);
     io.emit('projectileSpawned', projectile);
+  });
+
+  socket.on('destroyProjectile', (data) => {
+    let id = data?.id;
+    if (!projectiles.has(id) && data?.clientProjectileId) {
+      for (const [projectileKey, projectile] of projectiles) {
+        if (projectile.clientProjectileId === data.clientProjectileId) {
+          id = projectileKey;
+          break;
+        }
+      }
+    }
+
+    const projectile = projectiles.get(id);
+    if (!projectile) return;
+
+    projectiles.delete(id);
+    io.emit('projectileDestroyed', {
+      id,
+      clientProjectileId: projectile.clientProjectileId
+    });
   });
 
   // Handle player hit
@@ -119,6 +159,7 @@ io.on('connection', (socket) => {
     target.health -= data.damage || 20;
     if (target.health <= 0) {
       target.health = 100;
+      target.deaths += 1;
       const newPos = getRandomPosition();
       target.x = newPos.x;
       target.z = newPos.z;
@@ -131,7 +172,9 @@ io.on('connection', (socket) => {
       // Award kill to shooter
       const shooter = players.get(socket.id);
       if (shooter) {
-        io.to(socket.id).emit('kill', { targetId: target.id });
+        shooter.kills += 1;
+        io.to(socket.id).emit('kill', { targetId: target.id, kills: shooter.kills });
+        emitLeaderboard();
       }
     } else {
       io.emit('playerDamaged', {
@@ -148,6 +191,7 @@ io.on('connection', (socket) => {
     if (p) {
       p.nickname = nickname.substring(0, 16);
       io.emit('playerUpdated', { id: socket.id, nickname: p.nickname });
+      emitLeaderboard();
     }
   });
 
@@ -156,6 +200,7 @@ io.on('connection', (socket) => {
     console.log('Player disconnected:', socket.id);
     players.delete(socket.id);
     io.emit('playerLeft', socket.id);
+    emitLeaderboard();
   });
 });
 

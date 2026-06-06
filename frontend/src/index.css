@@ -100,6 +100,32 @@ body {
   padding: 2px 0;
 }
 
+.players-heading {
+  margin-top: 12px;
+}
+
+.rating-list {
+  margin-bottom: 2px;
+}
+
+.rating-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.rating-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rating-row strong {
+  color: #ffcc00;
+  font-size: 14px;
+}
+
 .connect-panel {
   position: absolute;
   top: 50%;

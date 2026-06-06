@@ -279,6 +279,79 @@ function createTree() {
   return group
 }
 
+function drawNameplate(sprite, player) {
+  const { canvas, ctx, texture } = sprite.userData
+  const health = Math.max(0, Math.min(100, player.health ?? 100))
+  const nickname = player.nickname || 'Tank'
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  ctx.font = '700 30px Arial'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  const textWidth = Math.min(300, ctx.measureText(nickname).width + 34)
+  const panelX = (canvas.width - textWidth) / 2
+  const panelY = 14
+  const panelH = 74
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.62)'
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.22)'
+  ctx.lineWidth = 2
+  ctx.beginPath()
+  ctx.roundRect(panelX, panelY, textWidth, panelH, 10)
+  ctx.fill()
+  ctx.stroke()
+
+  ctx.lineWidth = 5
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)'
+  ctx.strokeText(nickname, canvas.width / 2, 36)
+  ctx.fillStyle = '#ffffff'
+  ctx.fillText(nickname, canvas.width / 2, 36)
+
+  const barW = textWidth - 28
+  const barH = 12
+  const barX = (canvas.width - barW) / 2
+  const barY = 62
+
+  ctx.fillStyle = 'rgba(60, 60, 60, 0.9)'
+  ctx.fillRect(barX, barY, barW, barH)
+  ctx.fillStyle = '#39d353'
+  ctx.fillRect(barX, barY, barW * (health / 100), barH)
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)'
+  ctx.lineWidth = 1
+  ctx.strokeRect(barX, barY, barW, barH)
+
+  ctx.font = '700 12px Arial'
+  ctx.fillStyle = '#ffffff'
+  ctx.fillText(`${health} HP`, canvas.width / 2, barY + barH / 2 + 1)
+
+  texture.needsUpdate = true
+}
+
+function createNameplate(player) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 512
+  canvas.height = 144
+  const ctx = canvas.getContext('2d')
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.minFilter = THREE.LinearFilter
+  texture.magFilter = THREE.LinearFilter
+
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false
+  })
+  const sprite = new THREE.Sprite(material)
+  sprite.position.set(0, 4.8, 0)
+  sprite.scale.set(9.5, 2.7, 1)
+  sprite.renderOrder = 10
+  sprite.userData = { canvas, ctx, texture, baseScale: new THREE.Vector3(9.5, 2.7, 1) }
+  drawNameplate(sprite, player)
+  return sprite
+}
+
 function createLoopingNoiseSource(audioCtx) {
   const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 2, audioCtx.sampleRate)
   const data = buffer.getChannelData(0)
@@ -386,8 +459,12 @@ export default function TankGame({ nickname, serverIp }) {
   const playerTankRef = useRef(null)
   const otherPlayersRef = useRef(new Map())
   const projectilesRef = useRef(new Map())
+  const pendingProjectilesRef = useRef(new Map())
+  const ignoredPredictedProjectilesRef = useRef(new Set())
   const keysRef = useRef({})
   const mouseRef = useRef({ x: 0, y: 0 })
+  const mouseAimActiveRef = useRef(true)
+  const cameraModeRef = useRef('follow')
   const animFrameRef = useRef(null)
   const lastShotRef = useRef(0)
   const healthRef = useRef(100)
@@ -404,6 +481,8 @@ export default function TankGame({ nickname, serverIp }) {
   const [connected, setConnected] = useState(false)
   const [killFeed, setKillFeed] = useState([])
   const [kills, setKills] = useState(0)
+  const [leaderboard, setLeaderboard] = useState([])
+  const [cameraMode, setCameraMode] = useState('follow')
 
   const addKillFeed = useCallback((msg) => {
     setKillFeed(prev => {
@@ -622,8 +701,10 @@ export default function TankGame({ nickname, serverIp }) {
         tank.position.set(p.x, p.y, p.z)
         tank.rotation.y = p.rotation
         if (tank.userData.turret) tank.userData.turret.rotation.y = p.turretRotation
+        const nameplate = createNameplate(p)
+        tank.add(nameplate)
         scene.add(tank)
-        otherPlayersRef.current.set(p.id, { mesh: tank, data: p })
+        otherPlayersRef.current.set(p.id, { mesh: tank, data: p, nameplate })
       })
 
       updatePlayersList()
@@ -635,8 +716,10 @@ export default function TankGame({ nickname, serverIp }) {
       tank.position.set(player.x, player.y, player.z)
       tank.rotation.y = player.rotation
       if (tank.userData.turret) tank.userData.turret.rotation.y = player.turretRotation
+      const nameplate = createNameplate(player)
+      tank.add(nameplate)
       scene.add(tank)
-      otherPlayersRef.current.set(player.id, { mesh: tank, data: player })
+      otherPlayersRef.current.set(player.id, { mesh: tank, data: player, nameplate })
       updatePlayersList()
     })
 
@@ -653,6 +736,8 @@ export default function TankGame({ nickname, serverIp }) {
     socket.on('playerLeft', (id) => {
       const p = otherPlayersRef.current.get(id)
       if (p) {
+        p.nameplate?.material.map.dispose()
+        p.nameplate?.material.dispose()
         scene.remove(p.mesh)
         otherPlayersRef.current.delete(id)
       }
@@ -660,17 +745,40 @@ export default function TankGame({ nickname, serverIp }) {
     })
 
     socket.on('projectileSpawned', (data) => {
+      const pendingId = data.clientProjectileId
+      if (pendingId && ignoredPredictedProjectilesRef.current.has(pendingId)) {
+        ignoredPredictedProjectilesRef.current.delete(pendingId)
+        return
+      }
+
+      const pending = pendingId ? pendingProjectilesRef.current.get(pendingId) : null
+      if (pending) {
+        pendingProjectilesRef.current.delete(pendingId)
+        projectilesRef.current.delete(pendingId)
+        pending.data = data
+        projectilesRef.current.set(data.id, pending)
+        return
+      }
+
       const mesh = createProjectileMesh()
       mesh.position.set(data.x, data.y, data.z)
       scene.add(mesh)
       projectilesRef.current.set(data.id, { mesh, data, createdAt: Date.now() })
     })
 
-    socket.on('projectileDestroyed', (id) => {
-      const proj = projectilesRef.current.get(id)
+    socket.on('projectileDestroyed', (payload) => {
+      const id = typeof payload === 'object' ? payload.id : payload
+      const clientProjectileId = typeof payload === 'object' ? payload.clientProjectileId : null
+      const proj = projectilesRef.current.get(id) || (clientProjectileId ? projectilesRef.current.get(clientProjectileId) : null)
       if (proj) {
+        if (proj.data.clientProjectileId) {
+          pendingProjectilesRef.current.delete(proj.data.clientProjectileId)
+        }
         scene.remove(proj.mesh)
         projectilesRef.current.delete(id)
+        if (clientProjectileId) {
+          projectilesRef.current.delete(clientProjectileId)
+        }
       }
     })
 
@@ -680,7 +788,10 @@ export default function TankGame({ nickname, serverIp }) {
         setHealth(data.health)
       }
       const p = otherPlayersRef.current.get(data.id)
-      if (p) p.data.health = data.health
+      if (p) {
+        p.data.health = data.health
+        drawNameplate(p.nameplate, p.data)
+      }
       updatePlayersList()
     })
 
@@ -696,6 +807,7 @@ export default function TankGame({ nickname, serverIp }) {
       if (p) {
         p.mesh.position.set(data.x, 0, data.z)
         p.data.health = data.health
+        drawNameplate(p.nameplate, p.data)
       }
       updatePlayersList()
     })
@@ -706,10 +818,20 @@ export default function TankGame({ nickname, serverIp }) {
       addKillFeed('You destroyed an enemy tank!')
     })
 
+    socket.on('leaderboard', (rating) => {
+      setLeaderboard(rating)
+      const me = rating.find(player => player.id === socket.id)
+      if (me) {
+        killsRef.current = me.kills
+        setKills(me.kills)
+      }
+    })
+
     socket.on('playerUpdated', (data) => {
       const p = otherPlayersRef.current.get(data.id)
       if (p) {
         p.data.nickname = data.nickname
+        drawNameplate(p.nameplate, p.data)
         updatePlayersList()
       }
     })
@@ -757,6 +879,10 @@ export default function TankGame({ nickname, serverIp }) {
     const onKeyDown = (e) => {
       ensureAudio()
       keysRef.current[e.code] = true
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        e.preventDefault()
+        mouseAimActiveRef.current = false
+      }
       if (e.code === 'Space') {
         e.preventDefault()
         shoot()
@@ -766,22 +892,49 @@ export default function TankGame({ nickname, serverIp }) {
     const onMouseMove = (e) => {
       mouseRef.current.x = e.clientX
       mouseRef.current.y = e.clientY
+      mouseAimActiveRef.current = true
     }
     const onMouseDown = (e) => {
       ensureAudio()
       if (e.button === 0) shoot()
+    }
+    const onWheel = (e) => {
+      e.preventDefault()
+      const nextMode = e.deltaY < 0 ? 'drone' : 'follow'
+      if (cameraModeRef.current !== nextMode) {
+        cameraModeRef.current = nextMode
+        setCameraMode(nextMode)
+      }
     }
 
     window.addEventListener('keydown', onKeyDown)
     window.addEventListener('keyup', onKeyUp)
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mousedown', onMouseDown)
+    window.addEventListener('wheel', onWheel, { passive: false })
 
     function spawnExplosion(position) {
       const exp = createExplosion()
       exp.position.copy(position)
       scene.add(exp)
       effectsRef.current.push(exp)
+    }
+
+    function removeProjectile(pid, proj, notifyServer = false) {
+      spawnExplosion(proj.mesh.position)
+      scene.remove(proj.mesh)
+      if (proj.data.clientProjectileId) {
+        pendingProjectilesRef.current.delete(proj.data.clientProjectileId)
+        ignoredPredictedProjectilesRef.current.add(proj.data.clientProjectileId)
+      }
+      projectilesRef.current.delete(pid)
+
+      if (notifyServer) {
+        socket.emit('destroyProjectile', {
+          id: proj.data.id,
+          clientProjectileId: proj.data.clientProjectileId
+        })
+      }
     }
 
     function shoot() {
@@ -806,6 +959,7 @@ export default function TankGame({ nickname, serverIp }) {
       const speed = 45
       const spawnPos = worldPos.clone().add(direction.clone().multiplyScalar(2.5))
       spawnPos.y = 1.1
+      const clientProjectileId = `local-${socket.id}-${now}`
 
       // Muzzle flash
       const flash = createMuzzleFlash()
@@ -823,13 +977,32 @@ export default function TankGame({ nickname, serverIp }) {
         smokeRef.current.push(s)
       }
 
+      const projectileData = {
+        id: clientProjectileId,
+        ownerId: socket.id,
+        x: spawnPos.x,
+        y: spawnPos.y,
+        z: spawnPos.z,
+        vx: direction.x * speed,
+        vy: 0,
+        vz: direction.z * speed,
+        clientProjectileId
+      }
+      const projectileMesh = createProjectileMesh()
+      projectileMesh.position.copy(spawnPos)
+      scene.add(projectileMesh)
+      const predictedProjectile = { mesh: projectileMesh, data: projectileData, createdAt: now }
+      projectilesRef.current.set(clientProjectileId, predictedProjectile)
+      pendingProjectilesRef.current.set(clientProjectileId, predictedProjectile)
+
       socket.emit('shoot', {
         x: spawnPos.x,
         y: spawnPos.y,
         z: spawnPos.z,
         vx: direction.x * speed,
         vy: 0,
-        vz: direction.z * speed
+        vz: direction.z * speed,
+        clientProjectileId
       })
     }
 
@@ -847,21 +1020,21 @@ export default function TankGame({ nickname, serverIp }) {
         const rotSpeed = 2.5
         let moved = false
 
-        if (keysRef.current['KeyW'] || keysRef.current['ArrowUp']) {
+        if (keysRef.current['KeyW']) {
           tank.position.x += Math.sin(tank.rotation.y) * speed * delta
           tank.position.z += Math.cos(tank.rotation.y) * speed * delta
           moved = true
         }
-        if (keysRef.current['KeyS'] || keysRef.current['ArrowDown']) {
+        if (keysRef.current['KeyS']) {
           tank.position.x -= Math.sin(tank.rotation.y) * speed * delta
           tank.position.z -= Math.cos(tank.rotation.y) * speed * delta
           moved = true
         }
-        if (keysRef.current['KeyA'] || keysRef.current['ArrowLeft']) {
+        if (keysRef.current['KeyA']) {
           tank.rotation.y += rotSpeed * delta
           moved = true
         }
-        if (keysRef.current['KeyD'] || keysRef.current['ArrowRight']) {
+        if (keysRef.current['KeyD']) {
           tank.rotation.y -= rotSpeed * delta
           moved = true
         }
@@ -890,24 +1063,36 @@ export default function TankGame({ nickname, serverIp }) {
           }
         }
 
-        // Turret aim at mouse
+        // Turret aim at mouse or keyboard arrows
         const turret = tank.userData.turret
         if (turret) {
-          const vector = new THREE.Vector3(
-            (mouseRef.current.x / window.innerWidth) * 2 - 1,
-            -(mouseRef.current.y / window.innerHeight) * 2 + 1,
-            0.5
-          )
-          vector.unproject(camera)
-          const dir = vector.sub(camera.position).normalize()
-          const distance = -camera.position.y / dir.y
-          const pos = camera.position.clone().add(dir.multiplyScalar(distance))
-          const dx = pos.x - tank.position.x
-          const dz = pos.z - tank.position.z
-          let targetAngle = Math.atan2(dx, dz) - tank.rotation.y
-          while (targetAngle > Math.PI) targetAngle -= Math.PI * 2
-          while (targetAngle < -Math.PI) targetAngle += Math.PI * 2
-          turret.rotation.y += (targetAngle - turret.rotation.y) * 5 * delta
+          const turretKeySpeed = 2.8
+          if (keysRef.current['ArrowLeft']) {
+            turret.rotation.y += turretKeySpeed * delta
+          }
+          if (keysRef.current['ArrowRight']) {
+            turret.rotation.y -= turretKeySpeed * delta
+          }
+
+          if (mouseAimActiveRef.current) {
+            const vector = new THREE.Vector3(
+              (mouseRef.current.x / window.innerWidth) * 2 - 1,
+              -(mouseRef.current.y / window.innerHeight) * 2 + 1,
+              0.5
+            )
+            vector.unproject(camera)
+            const dir = vector.sub(camera.position).normalize()
+            const distance = -camera.position.y / dir.y
+            const pos = camera.position.clone().add(dir.multiplyScalar(distance))
+            const dx = pos.x - tank.position.x
+            const dz = pos.z - tank.position.z
+            const targetAngle = Math.atan2(dx, dz) - tank.rotation.y
+            const angleDelta = Math.atan2(
+              Math.sin(targetAngle - turret.rotation.y),
+              Math.cos(targetAngle - turret.rotation.y)
+            )
+            turret.rotation.y += angleDelta * Math.min(1, 7 * delta)
+          }
         }
 
         if (moved && socketRef.current) {
@@ -923,21 +1108,39 @@ export default function TankGame({ nickname, serverIp }) {
         if (driveSoundRef.current) {
           const isDriving = Boolean(
             keysRef.current['KeyW'] ||
-            keysRef.current['ArrowUp'] ||
-            keysRef.current['KeyS'] ||
-            keysRef.current['ArrowDown']
+            keysRef.current['KeyS']
           )
           driveSoundRef.current.setMoving(moved, isDriving ? 1 : 0.45)
         }
 
-        // Camera follow (smoother, lower angle)
-        const camOffset = new THREE.Vector3(0, 10, -16)
-        camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), tank.rotation.y)
-        const targetPos = tank.position.clone().add(camOffset)
-        camera.position.lerp(targetPos, 2.5 * delta)
-        const lookTarget = tank.position.clone().add(new THREE.Vector3(0, 2, 0))
-        camera.lookAt(lookTarget)
+        const turretYaw = turret?.rotation.y || 0
+        const cameraYaw = tank.rotation.y + turretYaw
+
+        if (cameraModeRef.current === 'drone') {
+          const droneOffset = new THREE.Vector3(0, 120, 0.1)
+          const targetPos = tank.position.clone().add(droneOffset)
+          camera.position.lerp(targetPos, 2.4 * delta)
+          camera.lookAt(tank.position.clone().add(new THREE.Vector3(0, 0, 0)))
+        } else {
+          // Camera follows the hull position while orbiting toward the turret aim direction.
+          const aimDirection = new THREE.Vector3(Math.sin(cameraYaw), 0, Math.cos(cameraYaw))
+          const camOffset = new THREE.Vector3(0, 10, -17)
+          camOffset.applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraYaw)
+          const targetPos = tank.position.clone().add(camOffset)
+          camera.position.lerp(targetPos, 3.2 * delta)
+          const lookTarget = tank.position.clone()
+            .add(new THREE.Vector3(0, 2.2, 0))
+            .add(aimDirection.multiplyScalar(5))
+          camera.lookAt(lookTarget)
+        }
       }
+
+      otherPlayersRef.current.forEach((player) => {
+        if (!player.nameplate) return
+        const distance = camera.position.distanceTo(player.mesh.position)
+        const scaleFactor = THREE.MathUtils.clamp(distance / 28, 1.15, 3.4)
+        player.nameplate.scale.copy(player.nameplate.userData.baseScale).multiplyScalar(scaleFactor)
+      })
 
       // Projectiles
       projectilesRef.current.forEach((proj) => {
@@ -992,22 +1195,28 @@ export default function TankGame({ nickname, serverIp }) {
       if (tank) {
         const selfPos = tank.position
         projectilesRef.current.forEach((proj, pid) => {
+          for (const collider of collidersRef.current) {
+            const dx = proj.mesh.position.x - collider.x
+            const dz = proj.mesh.position.z - collider.z
+            const projectileHitRadius = Math.max(0.8, collider.radius - 1.2)
+            if (dx * dx + dz * dz < projectileHitRadius * projectileHitRadius) {
+              removeProjectile(pid, proj, true)
+              return
+            }
+          }
+
           if (proj.data.ownerId === socket.id) {
             otherPlayersRef.current.forEach((op, oid) => {
               const dist = proj.mesh.position.distanceTo(op.mesh.position)
               if (dist < 2.2) {
                 socket.emit('hit', { targetId: oid, damage: 20 })
-                spawnExplosion(proj.mesh.position)
-                scene.remove(proj.mesh)
-                projectilesRef.current.delete(pid)
+                removeProjectile(pid, proj, true)
               }
             })
           } else {
             const dist = proj.mesh.position.distanceTo(selfPos)
             if (dist < 2.2) {
-              spawnExplosion(proj.mesh.position)
-              scene.remove(proj.mesh)
-              projectilesRef.current.delete(pid)
+              removeProjectile(pid, proj, true)
             }
           }
         })
@@ -1040,6 +1249,7 @@ export default function TankGame({ nickname, serverIp }) {
       window.removeEventListener('keyup', onKeyUp)
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mousedown', onMouseDown)
+      window.removeEventListener('wheel', onWheel)
       window.removeEventListener('resize', onResize)
       socket.disconnect()
       renderer.dispose()
@@ -1059,10 +1269,21 @@ export default function TankGame({ nickname, serverIp }) {
             <div className="health-fill" style={{ width: `${health}%` }} />
           </div>
           <div style={{ marginTop: 6, fontSize: 14 }}>Kills: {kills}</div>
+          <div style={{ marginTop: 4, fontSize: 13 }}>Camera: {cameraMode === 'drone' ? 'Drone' : 'Follow'}</div>
         </div>
 
         <div className="players-list">
-          <h3>Players ({players.length})</h3>
+          <h3>Kill Rating</h3>
+          <ul className="rating-list">
+            {(leaderboard.length ? leaderboard : players.map(p => ({ ...p, kills: 0, deaths: 0 }))).map((p, index) => (
+              <li key={p.id} className="rating-row" style={{ color: p.id === socketRef.current?.id || p.isSelf ? '#4fc3f7' : '#fff' }}>
+                <span>{index + 1}. {p.nickname}</span>
+                <strong>{p.kills}</strong>
+              </li>
+            ))}
+          </ul>
+
+          <h3 className="players-heading">Players ({players.length})</h3>
           <ul>
             {players.map(p => (
               <li key={p.id} style={{ color: p.isSelf ? '#4fc3f7' : '#fff' }}>
@@ -1083,8 +1304,9 @@ export default function TankGame({ nickname, serverIp }) {
         <div className="controls-info">
           <strong>Controls:</strong><br />
           W / S — Move forward / back<br />
-          A / D — Rotate left / right<br />
-          Mouse — Aim turret<br />
+          A / D — Rotate hull<br />
+          Mouse or ← / → — Aim turret<br />
+          Mouse wheel — Drone / follow view<br />
           Left Click / Space — Shoot
         </div>
       </div>
